@@ -5,7 +5,7 @@ import org.apache.commons.cli.Option
 ////////////////
 //  Paramaters
 ////////////////
-def cli = new CliBuilder( usage: 'dumpQueries.groovy')
+def cli = new CliBuilder( usage: 'groovy main.groovy -c /etc/etl_config.groovy')
 cli.with {
     c longOpt:'configFiles', required: true, args:Option.UNLIMITED_VALUES, argName:'configFile', 'Config file(s) location'
     v longOpt:'verbose', args:0, argName:'verbose', 'Show verbose messages'
