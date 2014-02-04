@@ -24,10 +24,48 @@ def isDateField = {!!(it=~"(date|time)")}
 def cleanTableName = {it?.replaceAll("[.]","_")}
 def parseNumberOnlyValues = {f,v->isDateField(f) && !(v instanceof Date) ? new java.sql.Date(v) : v}
 def encodeNumberOnlyValues = {v->v instanceof Date ? v.getTime() : v}
+def prepareLineForInsert = {aRs,aNumColumns,aOutputCharset->
+    return (1..aNumColumns).collect{
+        try {
+            return aRs.getObject(it)
+        } catch(e) {
+            def myMetaData = aRs.getMetaData()
+            if(myMetaData.getColumnClassName(it)=="java.lang.String") {
+                def myValue = new String(aRs.getBytes(it)?:(new byte[0]),aOutputCharset)?:''
+
+                // Due to the invalid octets being replaced by the 
+                // undefined octect character of \uFFFD, which is 3 bytes,
+                // the resultant string may be larger than allowable for 
+                // the column definition
+                while(myValue.bytes.length > myMetaData.getPrecision(it)) {
+                    def myLastIndexReplacementChar = myValue.lastIndexOf('\uFFFD')
+
+                    // If it's still too big, truncate to length or null the field
+                    if(myLastIndexReplacementChar==-1) {
+                        if(myValue.size()<2) {
+                            myValue = null
+                            break;
+                        }
+                        myValue = myValue[0..myValue.size()-2]
+                        continue
+                    }
+
+                    myValue = new StringBuilder(myValue).replace(
+                        myLastIndexReplacementChar,
+                        myLastIndexReplacementChar+1,""
+                    ).toString()
+                }
+                return myValue
+            } else {
+                println "Error handling field ${myMetaData.getColumnName(it)}, partial line: [${(1..aNumColumns-1).collect{c->aRs.getString(c)}.join ','}]"
+                throw e
+            }
+        }
+    }
+}
 def myDestTransforms = [
     "stripSchema":{it.replaceAll("^[^.]+[.]","")}
 ]
-
 
 
 ////////////////
@@ -55,9 +93,12 @@ def myTableDefs =myConfig.tableDefinitions
 def myRelationships = myConfig.relationships
 def myFetchSize = myConfig.fetchSize
 def myOutputType = myConfig.output.method
+def myOutputCharset = myConfig.output.charset?:'UTF-8'
 def myDestTransform = myConfig.output.destTransform
 def myOmitCommit = myConfig.output.omitCommit
 def myKeysTable = myConfig.keyTable
+def myExceptionLimit = myConfig.exceptionLimit?:10
+def myBatchSize = myConfig.output.batchSize?:1000
 
 
 // Datasources
@@ -290,20 +331,21 @@ myQueries.each {aTable,aQueryDefs->
                     mySrcDB.query aQueryDefs.query, myProps, {rs->
                         if(myFetchSize) rs.setFetchSize(myFetchSize);
                         while (rs.next()) {
-                            def myLine = (1..myColumnNumber).collect{rs.getObject(it)}
+                            def myLine
                             try {
+                                myLine = prepareLineForInsert(rs,myColumnNumber,myOutputCharset)
                                 ps.addBatch(myLine)
                             } catch (e) {
                                 println "Exception on: ${myLine}"
                                 e.printStackTrace()
                                 myExceptions++
-                                if(myExceptions==10) {
+                                if(myExceptions==myExceptionLimit10) {
                                     println "Too many exceptions!"
                                     System.exit(1)
                                 }
                             }
                             myBatchCount++
-                            if(myBatchCount % 1000 == 0) {
+                            if(myBatchCount % myBatchSize == 0) {
                                 try {
                                     myInserts += ps.executeBatch().size()
                                     if(!myOmitCommit) {ps.execute('commit')}
@@ -341,20 +383,21 @@ myQueries.each {aTable,aQueryDefs->
                         if(myFetchSize) rs.setFetchSize(myFetchSize);
                         log "Start iterating ResultSet"
                         while (rs.next()) {
-                            def myLine = (1..myColumnNumber).collect{rs.getObject(it)}
+                            def myLine
                             try {
+                                myLine = prepareLineForInsert(rs,myColumnNumber,myOutputCharset)
                                 ps.addBatch(myLine)
                             } catch (e) {
                                 println "Exception on: ${myLine}"
                                 e.printStackTrace()
                                 myExceptions++
-                                if(myExceptions==10) {
+                                if(myExceptions==myExceptionLimit) {
                                     println "Too many exceptions!"
                                     System.exit(1)
                                 }
                             }
                             myBatchCount++
-                            if(myBatchCount % 1000 == 0) {
+                            if(myBatchCount % myBatchSize == 0) {
                                 try {
                                     myInserts += ps.executeBatch().size()
                                 } catch (e) {
@@ -400,7 +443,6 @@ myQueries.each {aTable,aQueryDefs->
     // Get properties for the relationships
     myRelationships[aTable]?.each {aRelationship->
         def myRelatedTable=aRelationship.targetTable
-        def myRelatedPk = myRelatedDefinition.pk
 
         myKeyValues[myRelatedTable].each {n,v->
             def myKeyName = "${myRelatedTable}_${n}"
