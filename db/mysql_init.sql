@@ -4,9 +4,10 @@ grant all on simpleetl.* to simpleetl@'localhost' identified by 'simpleetl';
 flush privileges;
 
 
-create table keylog {
-    table varchar(100),
-    name varchar(100),
-    value int,
-    date_created datetime
-}
+create table keylog (
+    tableName varchar(100),
+    name varchar(255),
+    value bigint,
+    date_created datetime,
+    KEY `keylog_tnn` (`tableName`,`name`)
+)

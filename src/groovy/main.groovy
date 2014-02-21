@@ -9,6 +9,7 @@ def cli = new CliBuilder( usage: 'groovy main.groovy -c /etc/etl_config.groovy')
 cli.with {
     c longOpt:'configFiles', required: true, args:Option.UNLIMITED_VALUES, argName:'configFile', 'Config file(s) location'
     v longOpt:'verbose', args:0, argName:'verbose', 'Show verbose messages'
+    t longOpt:'table',args:1,argName:'table','Use only this table.'
 }
 def myOptions = cli.parse(args)
 
@@ -99,7 +100,7 @@ def myOmitCommit = myConfig.output.omitCommit
 def myKeysTable = myConfig.keyTable
 def myExceptionLimit = myConfig.exceptionLimit?:10
 def myBatchSize = myConfig.output.batchSize?:1000
-
+def myOnlyTable = myOptions.t
 
 // Datasources
 
@@ -147,6 +148,7 @@ if(["vertica-merge","jdbc"].contains(myOutputType)) {
 //  Generate 
 //  queries
 ////////////////
+log "Generate queries."
 def myQueries = myTableDefs.inject [:],{aQueries,aTable,aDefinition-> 
     // Static queries
     if(aDefinition.query && aDefinition.keyQuery) {
@@ -208,7 +210,17 @@ def myQueries = myTableDefs.inject [:],{aQueries,aTable,aDefinition->
 ////////////////
 
 // Get last key values
-def myPreviousKeysQuery = "select k1.tableName,k1.name,k1.value from ${myKeysTable} k1 left outer join ${myKeysTable} k2 on k1.tableName = k2.tableName and k1.name = k2.name and k1.date_created < k2.date_created where k2.name is null"
+def myPreviousKeysQuery = """
+select tableName, name, cast(substring(final_value, instr(final_value, '~')+1,1000) as signed) as value
+from (
+select tableName, name, max(concat(date_format(date_created, '%Y%m%d'), '~', value)) as final_value
+from ${myKeysTable} k1
+group by k1.tableName,k1.name
+) a
+"""
+
+// select k1.tableName,k1.name,k1.value from ${myKeysTable} k1 left outer join ${myKeysTable} k2 on k1.tableName = k2.tableName and k1.name = k2.name and k1.date_created < k2.date_created where k2.name is null
+
 def myPreviousKeys = [:].withDefault{[:]}
 myAppDB.eachRow myPreviousKeysQuery.toString(), {aResult->
     myPreviousKeys[aResult.tableName][aResult.name]=aResult.value
@@ -250,6 +262,7 @@ def myKeyValues = myQueries.inject [:].withDefault{[:]},{aKeyValues,aTable,aQuer
 //  Process data
 ////////////////
 myQueries.each {aTable,aQueryDefs->
+    if(myOnlyTable && aTable != myOnlyTable) return;
     log "Process data for ${aTable}"
 
     // Make properties
@@ -367,6 +380,7 @@ myQueries.each {aTable,aQueryDefs->
             def myDestinationTable = myDestTransforms[myDestTransform] ? myDestTransforms[myDestTransform](aTable) : aTable
             // Create a temp table
             myOutputDB.execute "create local temporary table ${myDestinationTable}_merge as select * from ${myDestinationTable} limit 0".toString()
+            myOutputDB.execute "alter table ${myDestinationTable}_merge add primary key (${myTableDefs[aTable].pk})".toString()
             def myInsertQuery = "insert into ${myDestinationTable}_merge(${myColumns.join(",")}) values(${myColumns.collect{'?'}.join(',')})"
             def myInserts = 0
             myOutputDB.withTransaction {conn->
@@ -432,7 +446,24 @@ myQueries.each {aTable,aQueryDefs->
     }
 
     // Successful, store the latest keys
-    if (myOutputType=="dry"||myOutputType=="queryOnly") return
+    if (myOutputType=="dry"||myOutputType=="queryOnly") {
+        myKeyValues[aTable].each{n,v->
+            log "insert into ${myKeysTable}(tableName,name,value,date_created) values(?,?,?,?)".toString()
+            log ([aTable,n,encodeNumberOnlyValues(v),new Date()])
+        }
+    
+        // Get properties for the relationships
+        myRelationships[aTable]?.each {aRelationship->
+            def myRelatedTable=aRelationship.targetTable
+
+            myKeyValues[myRelatedTable].each {n,v->
+                def myKeyName = "${myRelatedTable}_${n}".toString()
+                log "insert into ${myKeysTable}(tableName,name,value,date_created) values(?,?,?,?)".toString()
+                log ([aTable,myKeyName,encodeNumberOnlyValues(v),new Date()])
+            }
+        }
+        return
+    }
 
     myKeyValues[aTable].each{n,v->
         myAppDB.execute("insert into ${myKeysTable}(tableName,name,value,date_created) values(?,?,?,?)".toString(),
@@ -445,7 +476,7 @@ myQueries.each {aTable,aQueryDefs->
         def myRelatedTable=aRelationship.targetTable
 
         myKeyValues[myRelatedTable].each {n,v->
-            def myKeyName = "${myRelatedTable}_${n}"
+            def myKeyName = "${myRelatedTable}_${n}".toString()
             myAppDB.execute(
                 "insert into ${myKeysTable}(tableName,name,value,date_created) values(?,?,?,?)".toString(),
                 [aTable,myKeyName,encodeNumberOnlyValues(v),new Date()]
