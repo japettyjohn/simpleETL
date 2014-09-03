@@ -28,5 +28,6 @@ output {
 // Used to get the columns, e.g. "select * from db1.person limit 0;"
 metaInformationClause =[
     "com.mysql.jdbc.Driver" : "limit 0",
-    "oracle.jdbc.driver.OracleDriver":"where rownum < 2"
+    "oracle.jdbc.driver.OracleDriver":"where rownum < 2",
+    "oracle.jdbc.OracleDriver":"where rownum < 2"
 ]

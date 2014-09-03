@@ -21,7 +21,7 @@ def myOptions = cli.parse(args)
 def log = {aStatement ->
      if(myOptions.v) println "${new Date().toString().padRight(35)}${aStatement}"
 }
-def isDateField = {!!(it=~"(date|time)")}
+def isDateField = {!!(it=~"(date|time)") && !it.startsWith("increment_")}
 def cleanTableName = {it?.replaceAll("[.]","_")}
 def parseNumberOnlyValues = {f,v->isDateField(f) && !(v instanceof Date) ? new java.sql.Date(v) : v}
 def encodeNumberOnlyValues = {v->v instanceof Date ? v.getTime() : v}
@@ -89,6 +89,7 @@ def myConfig = myConfigSources.inject null,{c,f->
     myC
 }
 
+log "Set various settings"
 // Various settings
 def myTableDefs =myConfig.tableDefinitions
 def myRelationships = myConfig.relationships
@@ -103,9 +104,10 @@ def myBatchSize = myConfig.output.batchSize?:1000
 def myOnlyTable = myOptions.t
 
 // Datasources
-
+log "Datasources setup"
 // Configure src database,
 // where the source data comes
+log "Src DB"
 def mySrcDBConf = myConfig.db.src
 if(mySrcDBConf.properties) {
     mySrcDBConf.properties.user = mySrcDBConf.user
@@ -118,6 +120,7 @@ def myMetaInformationClause = myConfig.metaInformationClause[mySrcDBConf.driver]
 
 // Configure app database,
 // where application state gets saved etc.
+log "App DB"
 def myAppDBConf = myConfig.db.app
 if(myAppDBConf.properties) {
    myAppDBConf.properties.user = myAppDBConf.user
@@ -130,6 +133,7 @@ def myAppDB = Sql.newInstance(myAppDBConf.flatten())
 
 // Configure output db,
 // where results get stored
+log "Output DB"
 def myOutputDB
 if(["vertica-merge","jdbc"].contains(myOutputType)) {
     // Configure app database
@@ -150,6 +154,9 @@ if(["vertica-merge","jdbc"].contains(myOutputType)) {
 ////////////////
 log "Generate queries."
 def myQueries = myTableDefs.inject [:],{aQueries,aTable,aDefinition-> 
+    if(myOnlyTable && aTable!=myOnlyTable) {
+        return aQueries
+    }
     // Static queries
     if(aDefinition.query && aDefinition.keyQuery) {
         aQueries[aTable]=[query:aDefinition.query, keyQuery:aDefinition.keyQuery]
@@ -170,7 +177,11 @@ def myQueries = myTableDefs.inject [:],{aQueries,aTable,aDefinition->
     // Add update clause
     if(aDefinition.updateColumn) {
         def myUpdateColumn = aDefinition.updateColumn
-        myQuery += " union select * from ${myTable} t_0 where t_0.${myPk} <= :prev_${myPrefix}_${myPk} and t_0.${myUpdateColumn} > :prev_${myPrefix}_${myUpdateColumn} and t_0.${myUpdateColumn} <= :${myPrefix}_${myUpdateColumn}"
+        def myUpdatePkClause = "t_0.${myPk} <= :prev_${myPrefix}_${myPk}"
+        if(aDefinition.maxRecordPull) {
+            myUpdatePkClause = "(t_0.${myPk} > :prev_${myPrefix}_increment_${myUpdateColumn}_${myPk} and t_0.${myPk} <= :${myPrefix}_increment_${myUpdateColumn}_${myPk})"
+        }
+        myQuery += " union select * from ${myTable} t_0 where ${myUpdatePkClause} and t_0.${myUpdateColumn} > :prev_${myPrefix}_${myUpdateColumn} and t_0.${myUpdateColumn} <= :${myPrefix}_${myUpdateColumn}_next"
     }
 
     // Add relationships
@@ -213,14 +224,16 @@ def myQueries = myTableDefs.inject [:],{aQueries,aTable,aDefinition->
 def myPreviousKeysQuery = """
 select tableName, name, cast(substring(final_value, instr(final_value, '~')+1,1000) as signed) as value
 from (
-select tableName, name, max(concat(date_format(date_created, '%Y%m%d'), '~', value)) as final_value
-from ${myKeysTable} k1
+select tableName, name, max(concat(unix_timestamp(date_created), '~', value)) as final_value
+from ${myKeysTable} k1 ${myOnlyTable ? "where tableName = '"+myOnlyTable+"'":""}
 group by k1.tableName,k1.name
 ) a
 """
 
-// select k1.tableName,k1.name,k1.value from ${myKeysTable} k1 left outer join ${myKeysTable} k2 on k1.tableName = k2.tableName and k1.name = k2.name and k1.date_created < k2.date_created where k2.name is null
+log "Previous keys query ${myPreviousKeysQuery}"
 
+// select k1.tableName,k1.name,k1.value from ${myKeysTable} k1 left outer join ${myKeysTable} k2 on k1.tableName = k2.tableName and k1.name = k2.name and k1.date_created < k2.date_created where k2.name is null
+log "Getting previous keys"
 def myPreviousKeys = [:].withDefault{[:]}
 myAppDB.eachRow myPreviousKeysQuery.toString(), {aResult->
     myPreviousKeys[aResult.tableName][aResult.name]=aResult.value
@@ -228,7 +241,7 @@ myAppDB.eachRow myPreviousKeysQuery.toString(), {aResult->
 
 // Set the max date now so there isn't a gap caused by the time of the key queries
 def myMaxDate = new Date()
-
+log "Getting key values"
 // Set the new max data
 def myKeyValues = myQueries.inject [:].withDefault{[:]},{aKeyValues,aTable,aQueryDefs->
     log "keyQuery (${aTable}): ${aQueryDefs.keyQuery}"
@@ -248,11 +261,22 @@ def myKeyValues = myQueries.inject [:].withDefault{[:]},{aKeyValues,aTable,aQuer
 
     // If there is an update column get it
     def myUpdateName = myTableDefs[aTable].updateColumn
-    if(myKeyValueResults.containsKey(myUpdateName)) {
+    if(myUpdateName && myMaxRecordPull && myPreviousKeys[aTable][myUpdateName+"_next"]) {
+        aKeyValues[aTable][myUpdateName+"_next"]=myPreviousKeys[aTable][myUpdateName+"_next"]
+    } else if (myKeyValueResults.containsKey(myUpdateName)) {
         aKeyValues[aTable][myUpdateName]=myKeyValueResults[myUpdateName]
     } else if (isDateField(myUpdateName)) {
         aKeyValues[aTable][myUpdateName]=myMaxDate.getTime()
     };
+
+    if(myUpdateName && myMaxRecordPull) {
+        if(myKeyValueResults[myPKName]<myPreviousKeys[aTable]["increment_${myUpdateName}_${myPKName}"]) {
+            myPreviousKeys[aTable]["increment_${myUpdateName}_${myPKName}"]=1
+            aKeyValues[aTable][myUpdateName]=myPreviousKeys[aTable][myUpdateName+"_next"]
+            aKeyValues[aTable][myUpdateName+"_next"]=myMaxDate.getTime()
+        }
+        aKeyValues[aTable]["increment_${myUpdateName}_${myPKName}"]=myPreviousKeys[aTable]["increment_${myUpdateName}_${myPKName}"]+myMaxRecordPull
+    }
 
     return aKeyValues
 }
@@ -469,6 +493,10 @@ myQueries.each {aTable,aQueryDefs->
         myAppDB.execute("insert into ${myKeysTable}(tableName,name,value,date_created) values(?,?,?,?)".toString(),
             [aTable,n,encodeNumberOnlyValues(v),new Date()]
         )
+
+        myAppDB.execute("insert into ${myKeysTable}_last(tableName,name,value,date_created) values(?,?,?,?) on duplicate key update value = ?".toString(),
+            [aTable,n,encodeNumberOnlyValues(v),new Date(), encodeNumberOnlyValues(v)]
+        )
     }
     
     // Get properties for the relationships
@@ -480,6 +508,10 @@ myQueries.each {aTable,aQueryDefs->
             myAppDB.execute(
                 "insert into ${myKeysTable}(tableName,name,value,date_created) values(?,?,?,?)".toString(),
                 [aTable,myKeyName,encodeNumberOnlyValues(v),new Date()]
+            )
+
+            myAppDB.execute("insert into ${myKeysTable}_last(tableName,name,value,date_created) values(?,?,?,?) on duplicate key update value = ?".toString(),
+                [aTable,n,encodeNumberOnlyValues(v),new Date(),encodeNumberOnlyValues(v)]
             )
         }
     }
