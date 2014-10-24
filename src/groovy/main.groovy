@@ -185,6 +185,7 @@ def myQueries = myTableDefs.inject [:],{aQueries,aTable,aDefinition->
     }
 
     // Add relationships
+    def myRelationshipsForTable = [:];
     myRelationships[myTable]?.each {aRelationship->
         def myRelatedTable=aRelationship.targetTable
         def myRelatedPrefix=cleanTableName(myRelatedTable)
@@ -192,8 +193,7 @@ def myQueries = myTableDefs.inject [:],{aQueries,aTable,aDefinition->
         def myKey = aRelationship.key?:myPk
         def myFk = aRelationship.fk?:myPk
         def myRelatedPk = myRelatedDefinition.pk
-        myQuery += """
-        union 
+        myRelationshipsForTable[myRelatedTable]=[query:"""
         select *
         from ${myTable} t_0
         where exists (
@@ -202,7 +202,7 @@ def myQueries = myTableDefs.inject [:],{aQueries,aTable,aDefinition->
             where t_0.${myKey} = t_1.${myFk}
             and t_1.${myRelatedPk} > :prev_${myPrefix}_${myRelatedPrefix}_${myRelatedPk}
             and t_1.${myRelatedPk} <= :${myRelatedPrefix}_${myRelatedPk}
-        )"""
+        )""".toString(),minValue:"prev_${myPrefix}_${myRelatedPrefix}_${myRelatedPk}".toString(),maxValue:"${myRelatedPrefix}_${myRelatedPk}".toString()]
     }
 
     // Query to get next key
@@ -210,7 +210,7 @@ def myQueries = myTableDefs.inject [:],{aQueries,aTable,aDefinition->
     def myKeyQuery = "select max(${myPk}) ${myPk} ${myMaxUpdateColumn} from ${myTable}"
 
 
-    aQueries[aTable]=[query:myQuery.toString(),keyQuery:myKeyQuery.toString()]
+    aQueries[aTable]=[query:myQuery.toString(),keyQuery:myKeyQuery.toString(),relationships:myRelationshipsForTable]
     return aQueries
 }
 
@@ -305,14 +305,24 @@ myQueries.each {aTable,aQueryDefs->
     }
 
     // Get properties for the relationships
+
     myRelationships[aTable]?.each {aRelationship->
-        def myRelatedTable=aRelationship.targetTable
+       def myRelatedTable=aRelationship.targetTable
         def myRelatedPrefix=cleanTableName(myRelatedTable)
         def myRelatedDefinition = myTableDefs[myRelatedTable]
         def myRelatedPk = myRelatedDefinition.pk
-
         myKeyValues[myRelatedTable].each {n,v->
             myProps["${myRelatedPrefix}_${myRelatedPk}"]=parseNumberOnlyValues(n,v)
+        }
+        // If there is new records then insert the relationship query
+        def myRelatedTableQueryDefs = aQueryDefs.relationships[myRelatedTable]
+            def minVal=myProps["prev_${myPrefix}_${myRelatedPrefix}_${myRelatedPk}"]
+            def maxVal=myProps["${myRelatedPrefix}_${myRelatedPk}"]
+            log "Check relation of ${myRelatedTable} to ${aTable} as ${minVal} >= ${maxVal}"
+         if(minVal < maxVal) {
+            aQueryDefs.query += " union ${myRelatedTableQueryDefs.query} "
+        } else {
+            log "Did not include relationship ${myRelatedTable} to ${aTable} as ${minVal} >= ${maxVal}"
         }
     }
 
