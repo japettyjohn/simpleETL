@@ -28,6 +28,11 @@ output {
 // Used to get the columns, e.g. "select * from db1.person limit 0;"
 metaInformationClause =[
     "com.mysql.jdbc.Driver" : "limit 0",
+    "org.mariadb.jdbc.Driver" : "limit 1",
     "oracle.jdbc.driver.OracleDriver":"where rownum < 2",
     "oracle.jdbc.OracleDriver":"where rownum < 2"
+]
+
+queryHints =[
+    "org.mariadb.jdbc.Driver" : "SQL_NO_CACHE"
 ]

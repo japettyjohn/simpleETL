@@ -64,9 +64,6 @@ def prepareLineForInsert = {aRs,aNumColumns,aOutputCharset->
         }
     }
 }
-def myDestTransforms = [
-    "stripSchema":{it.replaceAll("^[^.]+[.]","")}
-]
 
 
 ////////////////
@@ -95,6 +92,7 @@ def myTableDefs =myConfig.tableDefinitions
 def myRelationships = myConfig.relationships
 def myFetchSize = myConfig.fetchSize
 def myOutputType = myConfig.output.method
+def myOutputSchema = myConfig.output.schema
 def myOutputCharset = myConfig.output.charset?:'UTF-8'
 def myDestTransform = myConfig.output.destTransform
 def myOmitCommit = myConfig.output.omitCommit
@@ -102,6 +100,10 @@ def myKeysTable = myConfig.keyTable
 def myExceptionLimit = myConfig.exceptionLimit?:10
 def myBatchSize = myConfig.output.batchSize?:1000
 def myOnlyTable = myOptions.t
+def myOnlyTables = [myOnlyTable]
+if(myRelationships[myOnlyTable]) {
+myOnlyTables += myRelationships[myOnlyTable].collect {it.targetTable}
+}
 
 // Datasources
 log "Datasources setup"
@@ -148,13 +150,22 @@ if(["vertica-merge","jdbc"].contains(myOutputType)) {
 }
 
 
+// Transforms
+def myDestTransforms = [
+    "stripSchema":{it.replaceAll("^[^.]+[.]","")},
+    "replaceSchema":{"${myOutputSchema}." + it.replaceAll("^[^.]+[.]","")}
+]
+def myHints = myConfig.queryHints[mySrcDBConf.driver]?:""
+
+
 ////////////////
 //  Generate 
 //  queries
 ////////////////
 log "Generate queries."
 def myQueries = myTableDefs.inject [:],{aQueries,aTable,aDefinition-> 
-    if(myOnlyTable && aTable!=myOnlyTable) {
+    if(myOnlyTable && !myOnlyTables.contains(aTable)) {
+        log "Skipping ${aTable}"
         return aQueries
     }
     // Static queries
@@ -172,7 +183,7 @@ def myQueries = myTableDefs.inject [:],{aQueries,aTable,aDefinition->
     def myPk = aDefinition.pk
 
     // Base select query
-    def myQuery= "select * from ${myTable} t_0 where ((t_0.${myPk} > :prev_${myPrefix}_${myPk} and t_0.${myPk} <= :${myPrefix}_${myPk}))"
+    def myQuery= "select ${myHints} * from ${myTable} t_0 where ((t_0.${myPk} > :prev_${myPrefix}_${myPk} and t_0.${myPk} <= :${myPrefix}_${myPk}))"
     
     // Add update clause
     if(aDefinition.updateColumn) {
@@ -221,11 +232,13 @@ def myQueries = myTableDefs.inject [:],{aQueries,aTable,aDefinition->
 ////////////////
 
 // Get last key values
+def myOnlyTablesClause = myOnlyTable ? "('${myOnlyTables.join("','")}')" : ""
+
 def myPreviousKeysQuery = """
 select tableName, name, cast(substring(final_value, instr(final_value, '~')+1,1000) as signed) as value
 from (
 select tableName, name, max(concat(unix_timestamp(date_created), '~', value)) as final_value
-from ${myKeysTable} k1 ${myOnlyTable ? "where tableName = '"+myOnlyTable+"'":""}
+from ${myKeysTable} k1 ${myOnlyTable ? "where tableName in ${myOnlyTablesClause}":""}
 group by k1.tableName,k1.name
 ) a
 """
@@ -286,7 +299,7 @@ def myKeyValues = myQueries.inject [:].withDefault{[:]},{aKeyValues,aTable,aQuer
 //  Process data
 ////////////////
 myQueries.each {aTable,aQueryDefs->
-    if(myOnlyTable && aTable != myOnlyTable) return;
+    if(myOnlyTable && !myOnlyTables.contains(aTable)) return;
     log "Process data for ${aTable}"
 
     // Make properties
@@ -311,15 +324,26 @@ myQueries.each {aTable,aQueryDefs->
         def myRelatedPrefix=cleanTableName(myRelatedTable)
         def myRelatedDefinition = myTableDefs[myRelatedTable]
         def myRelatedPk = myRelatedDefinition.pk
+        
         myKeyValues[myRelatedTable].each {n,v->
             myProps["${myRelatedPrefix}_${myRelatedPk}"]=parseNumberOnlyValues(n,v)
         }
         // If there is new records then insert the relationship query
         def myRelatedTableQueryDefs = aQueryDefs.relationships[myRelatedTable]
-            def minVal=myProps["prev_${myPrefix}_${myRelatedPrefix}_${myRelatedPk}"]
-            def maxVal=myProps["${myRelatedPrefix}_${myRelatedPk}"]
-            log "Check relation of ${myRelatedTable} to ${aTable} as ${minVal} >= ${maxVal}"
-         if(minVal < maxVal) {
+        def minVal=myProps["prev_${myPrefix}_${myRelatedPrefix}_${myRelatedPk}"]
+        def maxVal=myProps["${myRelatedPrefix}_${myRelatedPk}"]
+        def myMaxRecordPull = myTableDefs[aRelationship.targetTable].maxRecordPull
+
+
+        if(minVal < maxVal) {
+            // To make getting a full table real for the initial download,
+            // allow a capper
+            if(myMaxRecordPull && myMaxRecordPull < (maxVal - minVal)) {
+                maxVal = minVal + myMaxRecordPull
+                myProps["${myRelatedPrefix}_${myRelatedPk}"]=maxVal
+            }
+
+            log "Included relation of ${myRelatedTable} to ${aTable} as ${minVal} < ${maxVal}"
             aQueryDefs.query += " union ${myRelatedTableQueryDefs.query} "
         } else {
             log "Did not include relationship ${myRelatedTable} to ${aTable} as ${minVal} >= ${maxVal}"
@@ -412,10 +436,11 @@ myQueries.each {aTable,aQueryDefs->
 
         case "vertica-merge":
             def myDestinationTable = myDestTransforms[myDestTransform] ? myDestTransforms[myDestTransform](aTable) : aTable
-            // Create a temp table
-            myOutputDB.execute "create local temporary table ${myDestinationTable}_merge as select * from ${myDestinationTable} limit 0".toString()
-            myOutputDB.execute "alter table ${myDestinationTable}_merge add primary key (${myTableDefs[aTable].pk})".toString()
-            def myInsertQuery = "insert into ${myDestinationTable}_merge(${myColumns.join(",")}) values(${myColumns.collect{'?'}.join(',')})"
+            // Create a temp table, merge table cannot be given a schema
+            def myMergeTable = "${myDestTransforms['stripSchema'](myDestinationTable)}_merge"
+            myOutputDB.execute "create local temporary table ${myMergeTable} as select * from ${myDestinationTable} limit 0".toString()
+            myOutputDB.execute "alter table ${myMergeTable} add primary key (${myTableDefs[aTable].pk})".toString()
+            def myInsertQuery = "insert into ${myMergeTable}(${myColumns.join(",")}) values(${myColumns.collect{'?'}.join(',')})"
             def myInserts = 0
             myOutputDB.withTransaction {conn->
                 conn.setAutoCommit(false)
@@ -463,7 +488,7 @@ myQueries.each {aTable,aQueryDefs->
                 def myUpdateOnMatch = myColumns.findAll{it!=myMergePK}.collect{"${it}=m.${it}"}.join(',')
                 def myInsertValues = myColumns.collect{"m.${it}"}.join(',')
                 def myMergeQuery = """merge into ${myDestinationTable} d
-                using ${myDestinationTable}_merge m
+                using ${myMergeTable} m
                 on d.${myMergePK} = m.${myMergePK}
                 when matched then update set ${myUpdateOnMatch}
                 when not matched then insert (${myColumns.join(',')}) values (${myInsertValues})
@@ -473,7 +498,7 @@ myQueries.each {aTable,aQueryDefs->
 
                 // Merge and cleanup
                 myOutputDB.execute myMergeQuery
-                myOutputDB.execute "drop table ${myDestinationTable}_merge".toString()
+                myOutputDB.execute "drop table ${myMergeTable}".toString()
             }
             println "${myInserts} inserts done into ${myDestinationTable}."
             break;
