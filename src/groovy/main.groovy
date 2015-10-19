@@ -204,16 +204,24 @@ def myQueries = myTableDefs.inject [:],{aQueries,aTable,aDefinition->
         def myKey = aRelationship.key?:myPk
         def myFk = aRelationship.fk?:myPk
         def myRelatedPk = myRelatedDefinition.pk
-        myRelationshipsForTable[myRelatedTable]=[query:"""
+        myRelationshipsForTable[myRelatedTable]=[minValue:"prev_${myPrefix}_${myRelatedPrefix}_${myRelatedPk}".toString(),maxValue:"${myRelatedPrefix}_${myRelatedPk}".toString()]
+        
+        // Allow for multiple foreign keys
+        def fkClause = "= t_1.${myFk}"
+        if(myFk instanceof List) {
+            def myFkInList = myFk.collect({"t_1.${it}"}).join(',')
+            fkClause = "in (${myFkInList})"
+        }
+        myRelationshipsForTable[myRelatedTable].query="""
         select *
         from ${myTable} t_0
         where exists (
             select 1
             from ${myRelatedTable} t_1
-            where t_0.${myKey} = t_1.${myFk}
+            where t_0.${myKey} ${fkClause}
             and t_1.${myRelatedPk} > :prev_${myPrefix}_${myRelatedPrefix}_${myRelatedPk}
             and t_1.${myRelatedPk} <= :${myRelatedPrefix}_${myRelatedPk}
-        )""".toString(),minValue:"prev_${myPrefix}_${myRelatedPrefix}_${myRelatedPk}".toString(),maxValue:"${myRelatedPrefix}_${myRelatedPk}".toString()]
+        )""".toString()
     }
 
     // Query to get next key
@@ -280,6 +288,7 @@ def myKeyValues = myQueries.inject [:].withDefault{[:]},{aKeyValues,aTable,aQuer
         aKeyValues[aTable][myUpdateName]=myKeyValueResults[myUpdateName]
     } else if (isDateField(myUpdateName)) {
         aKeyValues[aTable][myUpdateName]=myMaxDate.getTime()
+        aKeyValues[aTable][myUpdateName+"_next"]=myMaxDate.getTime() // honestly not sure which of these two are used
     };
 
     if(myUpdateName && myMaxRecordPull) {
