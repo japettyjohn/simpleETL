@@ -12,7 +12,9 @@ cli.with {
     t longOpt:'table',args:1,argName:'table','Use only this table.'
 }
 def myOptions = cli.parse(args)
-
+if(myOptions==null) {
+    System.exit(1)
+}
 
 ////////////////
 //  Functions
@@ -25,7 +27,7 @@ def isDateField = {!!(it=~"(date|time)") && !it.startsWith("increment_")}
 def cleanTableName = {it?.replaceAll("[.]","_")}
 def parseNumberOnlyValues = {f,v->isDateField(f) && !(v instanceof Date) ? new java.sql.Date(v) : v}
 def encodeNumberOnlyValues = {v->v instanceof Date ? v.getTime() : v}
-def prepareLineForInsert = {aRs,aNumColumns,aOutputCharset->
+def prepareLineForInsert = {aRs,aNumColumns,aOutputCharset,aAuditSet,aPkIndex->
     return (1..aNumColumns).collect{
         try {
             return aRs.getObject(it)
@@ -55,6 +57,9 @@ def prepareLineForInsert = {aRs,aNumColumns,aOutputCharset->
                         myLastIndexReplacementChar,
                         myLastIndexReplacementChar+1,""
                     ).toString()
+                }
+                if(aAuditSet != null&& aPkIndex==it) {
+                    aAuditSet.add(myValue)
                 }
                 return myValue
             } else {
@@ -97,6 +102,7 @@ def myOutputCharset = myConfig.output.charset?:'UTF-8'
 def myDestTransform = myConfig.output.destTransform
 def myOmitCommit = myConfig.output.omitCommit
 def myKeysTable = myConfig.keyTable
+def myAuditTable = myConfig.auditTable
 def myExceptionLimit = myConfig.exceptionLimit?:10
 def myBatchSize = myConfig.output.batchSize?:1000
 def myOnlyTable = myOptions.t
@@ -369,6 +375,13 @@ myQueries.each {aTable,aQueryDefs->
     };
     def myColumns = mySrcTableMetaData.keySet()
     def myColumnNumber = myColumns.size()
+    def myPkIndex = 1
+    myColumns.eachWithIndex {columnName,index->
+        if(columnName==aQueryDefs.pk) {
+            myPkIndex=index+1
+        }
+    }
+    def myAuditList = myAuditTable!="" ? [] : null
 
 
     // Handle the different output types
@@ -413,7 +426,7 @@ myQueries.each {aTable,aQueryDefs->
                         while (rs.next()) {
                             def myLine
                             try {
-                                myLine = prepareLineForInsert(rs,myColumnNumber,myOutputCharset)
+                                myLine = prepareLineForInsert(rs,myColumnNumber,myOutputCharset,myAuditList,myPkIndex)
                                 ps.addBatch(myLine)
                             } catch (e) {
                                 println "Exception on: ${myLine}"
@@ -467,7 +480,7 @@ myQueries.each {aTable,aQueryDefs->
                         while (rs.next()) {
                             def myLine
                             try {
-                                myLine = prepareLineForInsert(rs,myColumnNumber,myOutputCharset)
+                                myLine = prepareLineForInsert(rs,myColumnNumber,myOutputCharset,myAuditList,myPkIndex)
                                 ps.addBatch(myLine)
                             } catch (e) {
                                 println "Exception on: ${myLine}"
@@ -533,6 +546,7 @@ myQueries.each {aTable,aQueryDefs->
         return
     }
 
+    // Log what we got upto
     myKeyValues[aTable].each{n,v->
         myAppDB.execute("insert into ${myKeysTable}(tableName,name,value,date_created) values(?,?,?,?)".toString(),
             [aTable,n,encodeNumberOnlyValues(v),new Date()]
@@ -557,6 +571,20 @@ myQueries.each {aTable,aQueryDefs->
             myAppDB.execute("insert into ${myKeysTable}_last(tableName,name,value,date_created) values(?,?,?,?) on duplicate key update value = ?".toString(),
                 [aTable,n,encodeNumberOnlyValues(v),new Date(),encodeNumberOnlyValues(v)]
             )
+        }
+    }
+
+    // Insert into the audit log
+    if(myAuditList!=null) {
+        myAppDB.withTransaction {conn->
+            conn.setAutoCommit(false)
+            myAppDB.withBatch 1000, "insert into ${myAuditTable}(tableName,colName,value,date_created) (?,?,?,?)".toString(), {ps->
+                def auditDate = new Date()
+                myAuditList.each {pk->
+                    ps.addBatch [aTable,myPKName,pk,auditDate]
+                }
+            }
+            conn.commit()
         }
     }
 }

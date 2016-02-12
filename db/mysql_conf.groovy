@@ -8,3 +8,4 @@ db {
 }
 
 keyTable = "keylog"
+auditTable = "auditlog"
