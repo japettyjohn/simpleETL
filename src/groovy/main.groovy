@@ -106,9 +106,11 @@ def myAuditTable = myConfig.auditTable
 def myExceptionLimit = myConfig.exceptionLimit?:10
 def myBatchSize = myConfig.output.batchSize?:1000
 def myOnlyTable = myOptions.t
-def myOnlyTables = [myOnlyTable]
+def myKeyLogDemarkDays = myOptions.keylogDemark
+def myOnlyTables = []
 if(myRelationships[myOnlyTable]) {
-myOnlyTables += myRelationships[myOnlyTable].collect {it.targetTable}
+    myOnlyTables.add(myOnlyTable)
+    myOnlyTables += myRelationships[myOnlyTable].collect {it.targetTable}
 }
 
 // Datasources
@@ -246,13 +248,29 @@ def myQueries = myTableDefs.inject [:],{aQueries,aTable,aDefinition->
 ////////////////
 
 // Get last key values
-def myOnlyTablesClause = myOnlyTable ? "('${myOnlyTables.join("','")}')" : ""
+if(!myOnlyTables) {
+    myOnlyTables += myTableDefs.keySet()
+}
+
+
+def myDateDemark = new Date()
+myAppDB.eachRow """select tableName, max(date_created) dc 
+from ${myKeysTable} 
+where tableName in ('${myOnlyTables.join("','")}') 
+and date_created > ?
+group by tableName""", (new Date()).plus(myKeyLogDemarkDays*-1), {aResult->
+    if(aResult.dc < myDateDemark) {
+        myDateDemark = aResult.dc
+    }
+}
 
 def myPreviousKeysQuery = """
 select tableName, name, cast(substring(final_value, instr(final_value, '~')+1,1000) as signed) as value
 from (
 select tableName, name, max(concat(unix_timestamp(date_created), '~', value)) as final_value
-from ${myKeysTable} k1 ${myOnlyTable ? "where tableName in ${myOnlyTablesClause}":""}
+from ${myKeysTable} k1
+where tableName in ('${myOnlyTables.join("','")}')
+and date_created > ?
 group by k1.tableName,k1.name
 ) a
 """
@@ -262,7 +280,7 @@ log "Previous keys query ${myPreviousKeysQuery}"
 // select k1.tableName,k1.name,k1.value from ${myKeysTable} k1 left outer join ${myKeysTable} k2 on k1.tableName = k2.tableName and k1.name = k2.name and k1.date_created < k2.date_created where k2.name is null
 log "Getting previous keys"
 def myPreviousKeys = [:].withDefault{[:]}
-myAppDB.eachRow myPreviousKeysQuery.toString(), {aResult->
+myAppDB.eachRow myPreviousKeysQuery.toString(), [myDateDemark], {aResult->
     myPreviousKeys[aResult.tableName][aResult.name]=aResult.value
 }
 

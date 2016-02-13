@@ -9,3 +9,4 @@ db {
 
 keyTable = "keylog"
 auditTable = "auditlog"
+keylogDemark = 2
