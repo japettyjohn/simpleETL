@@ -106,7 +106,7 @@ def myAuditTable = myConfig.auditTable
 def myExceptionLimit = myConfig.exceptionLimit?:10
 def myBatchSize = myConfig.output.batchSize?:1000
 def myOnlyTable = myOptions.t
-def myKeyLogDemarkDays = myOptions.keylogDemark
+def myKeyLogDemarkDays = myConfig.keylogDemark
 def myOnlyTables = []
 if(myRelationships[myOnlyTable]) {
     myOnlyTables.add(myOnlyTable)
@@ -252,13 +252,12 @@ if(!myOnlyTables) {
     myOnlyTables += myTableDefs.keySet()
 }
 
-
-def myDateDemark = new Date()
+def myDateDemark = (new Date()).plus(myKeyLogDemarkDays*-1)
 myAppDB.eachRow """select tableName, max(date_created) dc 
 from ${myKeysTable} 
 where tableName in ('${myOnlyTables.join("','")}') 
 and date_created > ?
-group by tableName""", (new Date()).plus(myKeyLogDemarkDays*-1), {aResult->
+group by tableName""".toString(), [myDateDemark], {aResult->
     if(aResult.dc < myDateDemark) {
         myDateDemark = aResult.dc
     }
@@ -276,6 +275,7 @@ group by k1.tableName,k1.name
 """
 
 log "Previous keys query ${myPreviousKeysQuery}"
+log "Previous keys demark ${myDateDemark}
 
 // select k1.tableName,k1.name,k1.value from ${myKeysTable} k1 left outer join ${myKeysTable} k2 on k1.tableName = k2.tableName and k1.name = k2.name and k1.date_created < k2.date_created where k2.name is null
 log "Getting previous keys"
