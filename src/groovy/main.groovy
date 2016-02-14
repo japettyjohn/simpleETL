@@ -27,14 +27,15 @@ def isDateField = {!!(it=~"(date|time)") && !it.startsWith("increment_")}
 def cleanTableName = {it?.replaceAll("[.]","_")}
 def parseNumberOnlyValues = {f,v->isDateField(f) && !(v instanceof Date) ? new java.sql.Date(v) : v}
 def encodeNumberOnlyValues = {v->v instanceof Date ? v.getTime() : v}
-def prepareLineForInsert = {aRs,aNumColumns,aOutputCharset,aAuditSet,aPkIndex->
+def prepareLineForInsert = {aRs,aNumColumns,aOutputCharset->
     return (1..aNumColumns).collect{
+        def myValue = null 
         try {
-            return aRs.getObject(it)
+            myValue = aRs.getObject(it)
         } catch(e) {
             def myMetaData = aRs.getMetaData()
             if(myMetaData.getColumnClassName(it)=="java.lang.String") {
-                def myValue = new String(aRs.getBytes(it)?:(new byte[0]),aOutputCharset)?:''
+                myValue = new String(aRs.getBytes(it)?:(new byte[0]),aOutputCharset)?:''
 
                 // Due to the invalid octets being replaced by the 
                 // undefined octect character of \uFFFD, which is 3 bytes,
@@ -58,15 +59,12 @@ def prepareLineForInsert = {aRs,aNumColumns,aOutputCharset,aAuditSet,aPkIndex->
                         myLastIndexReplacementChar+1,""
                     ).toString()
                 }
-                if(aAuditSet != null&& aPkIndex==it) {
-                    aAuditSet.add(myValue)
-                }
-                return myValue
             } else {
-                println "Error handling field ${myMetaData.getColumnName(it)}, partial line: [${(1..aNumColumns-1).collect{c->aRs.getString(c)}.join ','}]"
+                log "Error handling field ${myMetaData.getColumnName(it)}, partial line: [${(1..aNumColumns-1).collect{c->aRs.getString(c)}.join ','}]"
                 throw e
             }
         }
+        myValue
     }
 }
 
@@ -183,7 +181,7 @@ def myQueries = myTableDefs.inject [:],{aQueries,aTable,aDefinition->
     }
     // Misconfigured static queries
     if(aDefinition.query || aDefinition.keyQuery) {
-        System.err.println("${aTable} a either a query or keyQuery defined but not both - table skipped.")
+        log "${aTable} a either a query or keyQuery defined but not both - table skipped."
         return aQueries
     }
     def myTable = aTable
@@ -275,7 +273,7 @@ group by k1.tableName,k1.name
 """
 
 log "Previous keys query ${myPreviousKeysQuery}"
-log "Previous keys demark ${myDateDemark}
+log "Previous keys demark ${myDateDemark}"
 
 // select k1.tableName,k1.name,k1.value from ${myKeysTable} k1 left outer join ${myKeysTable} k2 on k1.tableName = k2.tableName and k1.name = k2.name and k1.date_created < k2.date_created where k2.name is null
 log "Getting previous keys"
@@ -399,7 +397,7 @@ myQueries.each {aTable,aQueryDefs->
             myPkIndex=index+1
         }
     }
-    def myAuditList = myAuditTable!="" ? [] : null
+    def myAuditSet = myAuditTable!="" ? [] : null
 
 
     // Handle the different output types
@@ -444,14 +442,17 @@ myQueries.each {aTable,aQueryDefs->
                         while (rs.next()) {
                             def myLine
                             try {
-                                myLine = prepareLineForInsert(rs,myColumnNumber,myOutputCharset,myAuditList,myPkIndex)
+                                myLine = prepareLineForInsert(rs,myColumnNumber,myOutputCharset)
+                                if(myAuditSet != null) {
+                                    myAuditSet.add(myLine[myPkIndex])
+                                }
                                 ps.addBatch(myLine)
                             } catch (e) {
-                                println "Exception on: ${myLine}"
+                                log "Exception on: ${myLine}"
                                 e.printStackTrace()
                                 myExceptions++
                                 if(myExceptions==myExceptionLimit10) {
-                                    println "Too many exceptions!"
+                                    log "Too many exceptions!"
                                     System.exit(1)
                                 }
                             }
@@ -471,7 +472,7 @@ myQueries.each {aTable,aQueryDefs->
                     myInserts += ps.executeBatch().size()
                 }
             }
-            println "${myInserts} inserts done."
+            log "${myInserts} inserts done."
             break;
 
         case "vertica-merge":
@@ -498,14 +499,17 @@ myQueries.each {aTable,aQueryDefs->
                         while (rs.next()) {
                             def myLine
                             try {
-                                myLine = prepareLineForInsert(rs,myColumnNumber,myOutputCharset,myAuditList,myPkIndex)
+                                myLine = prepareLineForInsert(rs,myColumnNumber,myOutputCharset)
+                                if(myAuditSet != null) {
+                                    myAuditSet.add(myLine[myPkIndex])
+                                }
                                 ps.addBatch(myLine)
                             } catch (e) {
-                                println "Exception on: ${myLine}"
+                                log "Exception on: ${myLine}"
                                 e.printStackTrace()
                                 myExceptions++
                                 if(myExceptions==myExceptionLimit) {
-                                    println "Too many exceptions!"
+                                    log "Too many exceptions!"
                                     System.exit(1)
                                 }
                             }
@@ -540,7 +544,7 @@ myQueries.each {aTable,aQueryDefs->
                 myOutputDB.execute myMergeQuery
                 myOutputDB.execute "drop table ${myMergeTable}".toString()
             }
-            println "${myInserts} inserts done into ${myDestinationTable}."
+            log "${myInserts} inserts done into ${myDestinationTable}."
             break;
     }
 
@@ -593,13 +597,13 @@ myQueries.each {aTable,aQueryDefs->
     }
 
     // Insert into the audit log
-    if(myAuditList!=null) {
+    if(myAuditSet!=null) {
         myAppDB.withTransaction {conn->
             conn.setAutoCommit(false)
-            myAppDB.withBatch 1000, "insert into ${myAuditTable}(tableName,colName,value,date_created) (?,?,?,?)".toString(), {ps->
+            myAppDB.withBatch 1000, "insert into ${myAuditTable}(tableName,colName,value,date_created) values(?,?,?,?)".toString(), {ps->
                 def auditDate = new Date()
-                myAuditList.each {pk->
-                    ps.addBatch [aTable,myPKName,pk,auditDate]
+                myAuditSet.each {pk->
+                    ps.addBatch([aTable,myTableDefs[aTable].pk,pk,auditDate])
                 }
             }
             conn.commit()
