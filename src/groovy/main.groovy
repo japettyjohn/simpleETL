@@ -60,12 +60,6 @@ def prepareLineForInsert = {aRs,aNumColumns,aOutputCharset->
                     ).toString()
                 }
 
-                if(aAuditSet != null&& aPkIndex==it) {
-                     if(myLine[myPkIndex]==null){log "Problem with ${myLine}"}
-                    aAuditSet.add(myValue)
-                }
-                return myValue
-
             } else {
                 log "Error handling field ${myMetaData.getColumnName(it)}, partial line: [${(1..aNumColumns-1).collect{c->aRs.getString(c)}.join ','}]"
                 throw e
@@ -337,7 +331,7 @@ def myKeyValues = myQueries.inject [:].withDefault{[:]},{aKeyValues,aTable,aQuer
 //  Process data
 ////////////////
 myQueries.each {aTable,aQueryDefs->
-    if(myOnlyTable && !myOnlyTables.contains(aTable)) return;
+    if(myOnlyTable && !myOnlyTables.contains(aTable)) {log "Skipping ${aTable}"; return};
     log "Process data for ${aTable}"
 
     // Make properties
