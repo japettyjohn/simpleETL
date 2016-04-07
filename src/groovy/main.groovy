@@ -59,6 +59,7 @@ def prepareLineForInsert = {aRs,aNumColumns,aOutputCharset,aAuditSet,aPkIndex->
                     ).toString()
                 }
                 if(aAuditSet != null&& aPkIndex==it) {
+                     if(myLine[myPkIndex]==null){log "Problem with ${myLine}"}
                     aAuditSet.add(myValue)
                 }
                 return myValue
@@ -393,10 +394,10 @@ myQueries.each {aTable,aQueryDefs->
     };
     def myColumns = mySrcTableMetaData.keySet()
     def myColumnNumber = myColumns.size()
-    def myPkIndex = 1
+    def myPkIndex = 0
     myColumns.eachWithIndex {columnName,index->
         if(columnName==aQueryDefs.pk) {
-            myPkIndex=index+1
+            myPkIndex=index
         }
     }
     def myAuditList = myAuditTable!="" ? [] : null
@@ -461,7 +462,7 @@ myQueries.each {aTable,aQueryDefs->
                                     myInserts += ps.executeBatch().size()
                                     if(!myOmitCommit) {ps.execute('commit')}
                                 } catch (e) {
-                                  log "Last line before exception: ${myLine}";
+                                  println "Last line before exception: ${myLine}";
                                   throw e;
                                 }
                                 log "Up to ${myBatchCount}"
