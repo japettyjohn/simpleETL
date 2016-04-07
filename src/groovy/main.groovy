@@ -59,14 +59,13 @@ def prepareLineForInsert = {aRs,aNumColumns,aOutputCharset->
                         myLastIndexReplacementChar+1,""
                     ).toString()
                 }
-<<<<<<< HEAD
+
                 if(aAuditSet != null&& aPkIndex==it) {
                      if(myLine[myPkIndex]==null){log "Problem with ${myLine}"}
                     aAuditSet.add(myValue)
                 }
                 return myValue
-=======
->>>>>>> a69e90018e12c45c29cc54d6a4bab4b94f07adf7
+
             } else {
                 log "Error handling field ${myMetaData.getColumnName(it)}, partial line: [${(1..aNumColumns-1).collect{c->aRs.getString(c)}.join ','}]"
                 throw e
